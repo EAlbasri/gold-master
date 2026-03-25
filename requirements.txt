@@ -1,5 +1,6 @@
 MetaTrader5
 anthropic
+openai
 pandas
 requests
 python-dotenv

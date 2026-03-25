@@ -1,31 +1,59 @@
-# Gold Master Intraday XAUUSD
+# Gold Master Hybrid Project
 
-This project is an MT5 + Claude intraday gold trader for XAUUSD.
+This project uses a hybrid AI architecture for intraday XAUUSD trading:
 
-## Architecture
-- MT5 price data scans every minute.
-- The technical engine proposes multiple intraday setup families:
-  - breakout retest
-  - breakout continuation
-  - liquidity sweep reversal
-  - trend pullback
-  - impulse continuation
-- Claude reviews the technical candidate.
-- Claude web search can add a macro/news/geopolitical veto on high-score candidates.
-- Telegram messages are sent as Gold Master.
+- Local MT5 strategy engine scans price every minute and builds technical trade candidates
+- Claude (Anthropic) is the final trade decision and veto layer for strong candidates only
+- OpenAI GPT-5 mini writes human-style market updates and macro/geopolitical commentary
+- Local state store keeps prior watched levels, last signal, and last analysis in `gold_master_state.json`
 
-## Important
-- Rotate any credentials you previously pasted into chat.
-- Start with `AUTO_EXECUTE=false`.
-- Keep `RISK_PER_TRADE=0.005` while validating on demo.
-- Anthropic web search must be enabled in your Claude Console/org to use live web checks.
+## Why this architecture
 
-## Run
-1. Copy `.env.template` to `.env`
-2. Fill in MT5, Anthropic, and Telegram credentials
-3. `pip install -r requirements.txt`
-4. Keep MT5 desktop open and logged in
-5. `python main.py`
+The local strategy engine handles almost all of the work:
+- breakout continuation
+- breakout retest
+- liquidity sweep reversal
+- impulse continuation
+- trend pullback
 
-## Notes on memory/state
-This project does not rely on LLM memory. It stores state locally in `gold_master_state.json` and passes relevant prior context back into Claude.
+This keeps cost down and avoids paying for an LLM every loop. Claude is only called when a candidate already scores well locally. OpenAI is used for startup/session/macro commentary.
+
+## Cost controls built in
+
+- Claude review only for candidates with `local_score >= LOCAL_REVIEW_THRESHOLD`
+- Claude review only on a new M5 candle if `CLAUDE_REVIEW_ON_NEW_M5_ONLY=true`
+- maximum `MAX_CANDIDATES_PER_SCAN`
+- pulse updates disabled by default
+- macro web checks are infrequent
+- commentary and macro use OpenAI; trade review uses Claude
+
+## No model memory required
+
+Do not rely on LLM memory for a trading bot.
+
+Instead, this project stores structured local state:
+- last analysis
+- watched levels
+- last signal
+- last macro headline
+
+That state is fed back into the models when needed, which is safer and more auditable than model memory.
+
+## Setup
+
+1. Rotate any secrets previously pasted into chat
+2. Copy `.env.template` to `.env`
+3. Fill in fresh keys and account values
+4. Install dependencies:
+   `pip install -r requirements.txt`
+5. Start with:
+   - `AUTO_EXECUTE=false`
+   - `RISK_PER_TRADE=0.005`
+   - `MAX_OPEN_TRADES=1`
+
+## Notes
+
+- The scanner runs every minute, but AI review does not run every minute by default.
+- Startup/session/macro messages are written as Gold Master.
+- Signals and execution messages remain structured.
+- This project is for day trading only, not swing trading.
