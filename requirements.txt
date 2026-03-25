@@ -1,0 +1,7 @@
+MetaTrader5
+anthropic
+pandas
+requests
+python-dotenv
+tzdata
+backports.zoneinfo; python_version < "3.9"
