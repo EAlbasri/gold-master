@@ -8,7 +8,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 def _extract_json(text):
     if not text:
         raise ValueError("Empty response from OpenAI")
-    cleaned = text.strip().replace("```json", "").replace("```", "").strip()
+    cleaned = str(text).strip().replace("```json", "").replace("```", "").strip()
     try:
         return json.loads(cleaned)
     except Exception:
@@ -18,30 +18,42 @@ def _extract_json(text):
         raise ValueError("Could not parse OpenAI JSON response: {0}".format(cleaned))
     return json.loads(match.group(0))
 
+def _get_attr_or_key(obj, name, default=None):
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
 def _response_to_text(response):
-    if hasattr(response, "output_text") and response.output_text:
-        return response.output_text
+    direct = _get_attr_or_key(response, "output_text", "")
+    if direct:
+        return direct.strip()
+    parts = []
     try:
-        parts = []
-        for item in getattr(response, "output", []):
-            for content in getattr(item, "content", []):
-                text = getattr(content, "text", None)
-                if text:
-                    parts.append(text)
-        return "\n".join(parts).strip()
+        for item in _get_attr_or_key(response, "output", []):
+            for content in _get_attr_or_key(item, "content", []):
+                if _get_attr_or_key(content, "type", "") == "output_text":
+                    text = _get_attr_or_key(content, "text", "")
+                    if text:
+                        parts.append(text)
     except Exception:
-        return ""
+        pass
+    joined = "\n".join([p for p in parts if p]).strip()
+    if joined:
+        return joined
+    raise ValueError("Empty response from OpenAI")
 
 def _call_json(prompt, max_tokens, use_web=False):
     kwargs = {
         "model": OPENAI_COMMENTARY_MODEL,
         "input": prompt,
         "max_output_tokens": max_tokens,
+        "text": {"format": {"type": "json_object"}},
     }
     if use_web and OPENAI_WEB_SEARCH:
-        kwargs["tools"] = [{"type": "web_search_preview"}]
+        kwargs["tools"] = [{"type": "web_search_preview", "search_context_size": "low"}]
         kwargs["tool_choice"] = "auto"
-        kwargs["max_tool_calls"] = 2
     response = client.responses.create(**kwargs)
     return _extract_json(_response_to_text(response))
 
@@ -76,7 +88,10 @@ Return JSON only:
 Payload:
 {payload_json}
 """.replace("{payload_json}", json.dumps(payload, indent=2))
-    result = _call_json(prompt, OPENAI_COMMENTARY_MAX_TOKENS, use_web=use_web)
+    try:
+        result = _call_json(prompt, OPENAI_COMMENTARY_MAX_TOKENS, use_web=use_web)
+    except Exception:
+        return {"bias": "sideways", "summary": "Gold is mixed for now, so I’m waiting for cleaner structure before leaning too hard either way.", "expected_high": 0, "expected_low": 0, "key_level_up": 0, "key_level_down": 0}
     result.setdefault("bias", "sideways")
     result.setdefault("summary", "Gold is still mixed for now, so I’m waiting for cleaner structure.")
     result.setdefault("expected_high", 0)
@@ -110,7 +125,10 @@ If there is no meaningful fresh update, return has_update=false.
 Payload:
 {payload_json}
 """.replace("{payload_json}", json.dumps(payload, indent=2))
-    result = _call_json(prompt, OPENAI_MACRO_MAX_TOKENS, use_web=use_web)
+    try:
+        result = _call_json(prompt, OPENAI_MACRO_MAX_TOKENS, use_web=use_web)
+    except Exception:
+        return {"has_update": False, "headline": "", "impact_note": ""}
     result.setdefault("has_update", False)
     result.setdefault("headline", "")
     result.setdefault("impact_note", "")
