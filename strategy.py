@@ -9,6 +9,7 @@ from config import (
     ENABLE_IMPULSE_CONTINUATION,
     ENABLE_LIQUIDITY_REVERSAL,
     ENABLE_TREND_PULLBACK,
+    MIN_RR,
     TP_RR,
 )
 from mt5_client import get_rates, get_tick
@@ -37,7 +38,7 @@ def candle_body(df, idx=-1):
     return abs(float(df["close"].iloc[idx]) - float(df["open"].iloc[idx]))
 
 
-def avg_body(df, n=12):
+def avg_body(df, n=10):
     sample = df.iloc[-n:]
     return float((sample["close"] - sample["open"]).abs().mean())
 
@@ -84,22 +85,21 @@ def market_bias(symbol):
 
 
 def classify_regime(symbol):
-    m15 = get_rates(symbol, mt5.TIMEFRAME_M15, 100)
+    m15 = get_rates(symbol, mt5.TIMEFRAME_M15, 80)
     bias = market_bias(symbol)
 
     recent_high = float(m15["high"].iloc[-21:-1].max())
     recent_low = float(m15["low"].iloc[-21:-1].min())
     last_close = float(m15["close"].iloc[-1])
-    body = candle_body(m15, -1)
+    last_body = candle_body(m15, -1)
     mean_body = avg_body(m15, 12)
-    width = max(recent_high - recent_low, 1.0)
-    compression_pct = (width / max(last_close, 1.0)) * 100.0
+    compression_pct = ((recent_high - recent_low) / max(last_close, 1.0)) * 100.0
 
-    if bias == "bullish" and float(m15["close"].iloc[-1]) > recent_high and body > mean_body * 1.3:
+    if bias == "bullish" and last_close > recent_high and last_body > mean_body * 1.3:
         return "bullish_expansion"
-    if bias == "bearish" and float(m15["close"].iloc[-1]) < recent_low and body > mean_body * 1.3:
+    if bias == "bearish" and last_close < recent_low and last_body > mean_body * 1.3:
         return "bearish_expansion"
-    if compression_pct < 0.9 and mean_body < max(last_close * 0.0015, 5.0):
+    if compression_pct < 0.9:
         return "sideways_compression"
     if bias == "bullish":
         return "bullish_trend"
@@ -113,7 +113,6 @@ def vwap_reclaim(symbol, direction):
     vwap = get_intraday_vwap(m5)
     last_close = float(m5["close"].iloc[-1])
     last_vwap = float(vwap.iloc[-1])
-
     if direction == "buy":
         return last_close > last_vwap
     return last_close < last_vwap
@@ -121,6 +120,7 @@ def vwap_reclaim(symbol, direction):
 
 def reversal_confirmed(symbol, direction):
     m5 = get_rates(symbol, mt5.TIMEFRAME_M5, 10)
+
     prev_open = float(m5["open"].iloc[-2])
     prev_close = float(m5["close"].iloc[-2])
     curr_open = float(m5["open"].iloc[-1])
@@ -171,28 +171,30 @@ def find_latest_fvg(symbol, direction):
         c2 = m15.iloc[i - 1]
         c3 = m15.iloc[i]
 
-        if direction == "buy" and float(c1["high"]) < float(c3["low"]):
-            gap_low = float(c1["high"])
-            gap_high = float(c3["low"])
-            return {
-                "found": True,
-                "type": "bullish",
-                "gap_low": round(gap_low, 2),
-                "gap_high": round(gap_high, 2),
-                "mid": round((gap_low + gap_high) / 2.0, 2),
-                "reference_time": str(c2["time"]),
-            }
-        if direction == "sell" and float(c1["low"]) > float(c3["high"]):
-            gap_low = float(c3["high"])
-            gap_high = float(c1["low"])
-            return {
-                "found": True,
-                "type": "bearish",
-                "gap_low": round(gap_low, 2),
-                "gap_high": round(gap_high, 2),
-                "mid": round((gap_low + gap_high) / 2.0, 2),
-                "reference_time": str(c2["time"]),
-            }
+        if direction == "buy":
+            if float(c1["high"]) < float(c3["low"]):
+                gap_low = float(c1["high"])
+                gap_high = float(c3["low"])
+                return {
+                    "found": True,
+                    "type": "bullish",
+                    "gap_low": round(gap_low, 2),
+                    "gap_high": round(gap_high, 2),
+                    "mid": round((gap_low + gap_high) / 2.0, 2),
+                    "reference_time": str(c2["time"]),
+                }
+        else:
+            if float(c1["low"]) > float(c3["high"]):
+                gap_low = float(c3["high"])
+                gap_high = float(c1["low"])
+                return {
+                    "found": True,
+                    "type": "bearish",
+                    "gap_low": round(gap_low, 2),
+                    "gap_high": round(gap_high, 2),
+                    "mid": round((gap_low + gap_high) / 2.0, 2),
+                    "reference_time": str(c2["time"]),
+                }
     return {"found": False}
 
 
@@ -221,34 +223,33 @@ def detect_breakout_continuation(symbol, direction, regime):
     if not ENABLE_BREAKOUT_CONTINUATION:
         return None
 
-    m15 = get_rates(symbol, mt5.TIMEFRAME_M15, 60)
+    m15 = get_rates(symbol, mt5.TIMEFRAME_M15, 70)
     levels = _get_recent_levels(m15)
     last = m15.iloc[-1]
-    prev = m15.iloc[-2]
-    width = max(levels["range_high_20"] - levels["range_low_20"], 12.0)
+    range_high = levels["range_high_20"]
+    range_low = levels["range_low_20"]
+    width = max(range_high - range_low, 8.0)
     body = candle_body(m15, -1)
     mean_body = avg_body(m15, 12)
 
     if direction == "buy":
-        broke = float(last["close"]) > levels["range_high_20"] and float(prev["close"]) <= levels["range_high_20"]
-        if broke and body > mean_body * 1.2:
+        if float(last["close"]) > range_high and body > mean_body * 1.25 and float(last["close"]) > float(last["open"]):
             return _make_candidate(
                 "breakout_continuation",
                 "buy",
                 float(last["close"]),
-                min(float(last["low"]), levels["range_high_20"]),
+                min(float(last["low"]), range_high),
                 float(last["close"]) + width,
                 "Strong M15 upside displacement through recent range high.",
                 regime,
             )
     else:
-        broke = float(last["close"]) < levels["range_low_20"] and float(prev["close"]) >= levels["range_low_20"]
-        if broke and body > mean_body * 1.2:
+        if float(last["close"]) < range_low and body > mean_body * 1.25 and float(last["close"]) < float(last["open"]):
             return _make_candidate(
                 "breakout_continuation",
                 "sell",
                 float(last["close"]),
-                max(float(last["high"]), levels["range_low_20"]),
+                max(float(last["high"]), range_low),
                 float(last["close"]) - width,
                 "Strong M15 downside displacement through recent range low.",
                 regime,
@@ -260,17 +261,18 @@ def detect_breakout_retest(symbol, direction, regime):
     if not ENABLE_BREAKOUT_RETEST:
         return None
 
-    m15 = get_rates(symbol, mt5.TIMEFRAME_M15, 60)
+    m15 = get_rates(symbol, mt5.TIMEFRAME_M15, 70)
     levels = _get_recent_levels(m15)
-    prev2 = m15.iloc[-2]
     last = m15.iloc[-1]
+    prev = m15.iloc[-2]
+    prev2 = m15.iloc[-3]
     range_high = levels["range_high_20"]
     range_low = levels["range_low_20"]
-    width = max(range_high - range_low, 12.0)
-    tolerance = max(width * 0.15, 5.0)
+    width = max(range_high - range_low, 8.0)
+    tolerance = max(width * 0.12, 4.0)
 
     if direction == "buy":
-        breakout = float(prev2["close"]) > range_high
+        breakout = float(prev2["close"]) > range_high or float(prev["close"]) > range_high
         retest = float(last["low"]) <= range_high + tolerance and float(last["close"]) > range_high
         if breakout and retest:
             return _make_candidate(
@@ -283,7 +285,7 @@ def detect_breakout_retest(symbol, direction, regime):
                 regime,
             )
     else:
-        breakout = float(prev2["close"]) < range_low
+        breakout = float(prev2["close"]) < range_low or float(prev["close"]) < range_low
         retest = float(last["high"]) >= range_low - tolerance and float(last["close"]) < range_low
         if breakout and retest:
             return _make_candidate(
@@ -298,46 +300,97 @@ def detect_breakout_retest(symbol, direction, regime):
     return None
 
 
+def detect_failed_bounce_continuation(symbol, direction, regime):
+    if not ENABLE_FAILED_BOUNCE_CONTINUATION:
+        return None
+
+    if regime not in ["bullish_trend", "bullish_expansion", "bearish_trend", "bearish_expansion"]:
+        return None
+
+    m15 = get_rates(symbol, mt5.TIMEFRAME_M15, 80).copy()
+    m15["ema20"] = ema(m15["close"], 20)
+    recent = m15.iloc[-6:]
+    last = m15.iloc[-1]
+    prev = m15.iloc[-2]
+
+    if direction == "sell":
+        bounced = float(recent["high"].max()) >= float(m15["ema20"].iloc[-1]) - 2.0
+        reject = float(last["close"]) < float(prev["low"])
+        if bounced and reject:
+            target = float(m15["low"].iloc[-25:-1].min())
+            return _make_candidate(
+                "failed_bounce_continuation",
+                "sell",
+                float(last["close"]),
+                float(recent["high"].max()),
+                min(target, float(last["close"]) - 12.0),
+                "Bearish bounce failed into value, continuation lower confirmed.",
+                regime,
+            )
+    else:
+        dipped = float(recent["low"].min()) <= float(m15["ema20"].iloc[-1]) + 2.0
+        reject = float(last["close"]) > float(prev["high"])
+        if dipped and reject:
+            target = float(m15["high"].iloc[-25:-1].max())
+            return _make_candidate(
+                "failed_bounce_continuation",
+                "buy",
+                float(last["close"]),
+                float(recent["low"].min()),
+                max(target, float(last["close"]) + 12.0),
+                "Bullish dip failed lower into value, continuation higher confirmed.",
+                regime,
+            )
+    return None
+
+
 def detect_trend_pullback(symbol, direction, regime):
-    if not ENABLE_TREND_PULLBACK or regime in ["sideways", "sideways_compression"]:
+    if not ENABLE_TREND_PULLBACK:
+        return None
+    if regime in ["sideways", "sideways_compression"]:
         return None
 
     m15 = get_rates(symbol, mt5.TIMEFRAME_M15, 80).copy()
     m15["ema20"] = ema(m15["close"], 20)
     m15["ema50"] = ema(m15["close"], 50)
+    fvg = find_latest_fvg(symbol, direction)
     recent = m15.iloc[-6:]
     last = m15.iloc[-1]
     prev = m15.iloc[-2]
 
     if direction == "buy":
         trend_ok = float(m15["ema20"].iloc[-1]) > float(m15["ema50"].iloc[-1])
-        touched = float(recent["low"].min()) <= float(m15["ema20"].iloc[-1]) + 4.0
+        touched = float(recent["low"].min()) <= float(m15["ema20"].iloc[-1]) + 3.0
         confirm = float(last["close"]) > float(prev["high"])
         if trend_ok and touched and confirm:
             invalidation = float(recent["low"].min())
+            if fvg.get("found"):
+                invalidation = min(invalidation, float(fvg.get("gap_low", invalidation)))
             target = float(m15["high"].iloc[-25:-1].max())
             return _make_candidate(
                 "trend_pullback",
                 "buy",
                 float(last["close"]),
                 invalidation,
-                max(target, float(last["close"]) + 15.0),
+                max(target, float(last["close"]) + 10.0),
                 "Bull trend pullback into M15 value zone with continuation confirmation.",
                 regime,
             )
     else:
         trend_ok = float(m15["ema20"].iloc[-1]) < float(m15["ema50"].iloc[-1])
-        touched = float(recent["high"].max()) >= float(m15["ema20"].iloc[-1]) - 4.0
-        confirm = float(last["close"])
-        if trend_ok and touched and float(last["close"]) < float(prev["low"]):
+        touched = float(recent["high"].max()) >= float(m15["ema20"].iloc[-1]) - 3.0
+        confirm = float(last["close"]) < float(prev["low"])
+        if trend_ok and touched and confirm:
             invalidation = float(recent["high"].max())
+            if fvg.get("found"):
+                invalidation = max(invalidation, float(fvg.get("gap_high", invalidation)))
             target = float(m15["low"].iloc[-25:-1].min())
             return _make_candidate(
                 "trend_pullback",
                 "sell",
                 float(last["close"]),
                 invalidation,
-                min(target, float(last["close"]) - 15.0),
+                min(target, float(last["close"]) - 10.0),
                 "Bear trend pullback into M15 value zone with continuation confirmation.",
                 regime,
             )
@@ -352,6 +405,7 @@ def detect_liquidity_reversal(symbol, direction, regime):
     fvg = find_latest_fvg(symbol, direction)
     vwap_ok = vwap_reclaim(symbol, direction)
     reversal_ok = reversal_confirmed(symbol, direction)
+
     if not (sweep.get("swept") and vwap_ok and reversal_ok):
         return None
 
@@ -374,39 +428,10 @@ def detect_liquidity_reversal(symbol, direction, regime):
     )
 
 
-def detect_failed_bounce_continuation(symbol, direction, regime):
-    if not ENABLE_FAILED_BOUNCE_CONTINUATION:
-        return None
-
-    if direction != "sell" or regime not in ["bearish_trend", "bearish_expansion"]:
-        return None
-
-    m15 = get_rates(symbol, mt5.TIMEFRAME_M15, 80).copy()
-    m15["ema20"] = ema(m15["close"], 20)
-    recent = m15.iloc[-8:]
-    last = m15.iloc[-1]
-    prev = m15.iloc[-2]
-    recent_break_low = float(m15["low"].iloc[-20:-8].min())
-
-    bounce_to_value = float(recent["high"].max()) >= float(m15["ema20"].iloc[-1]) - 3.0
-    rejection = float(last["close"]) < float(prev["low"])
-    still_below_break = float(last["close"]) < recent_break_low + 8.0
-
-    if bounce_to_value and rejection and still_below_break:
-        return _make_candidate(
-            "failed_bounce_continuation",
-            "sell",
-            float(last["close"]),
-            float(recent["high"].max()),
-            float(last["close"]) - max(float(recent["high"].max()) - float(last["close"]), 15.0),
-            "Bearish failed bounce into value area followed by continuation lower.",
-            regime,
-        )
-    return None
-
-
 def detect_impulse_continuation(symbol, direction, regime):
-    if not ENABLE_IMPULSE_CONTINUATION or regime in ["sideways", "sideways_compression"]:
+    if not ENABLE_IMPULSE_CONTINUATION:
+        return None
+    if regime in ["sideways", "sideways_compression"]:
         return None
 
     m15 = get_rates(symbol, mt5.TIMEFRAME_M15, 60).copy()
@@ -422,6 +447,7 @@ def detect_impulse_continuation(symbol, direction, regime):
         if direction == "sell" and float(m15["close"].iloc[idx]) < float(m15["open"].iloc[idx]) and body > mean_body * 1.8:
             impulse_idx = idx
             break
+
     if impulse_idx is None:
         return None
 
@@ -429,33 +455,39 @@ def detect_impulse_continuation(symbol, direction, regime):
     impulse_close = float(m15["close"].iloc[impulse_idx])
     impulse_high = float(m15["high"].iloc[impulse_idx])
     impulse_low = float(m15["low"].iloc[impulse_idx])
+
     recent = m15.iloc[impulse_idx + 1:]
     last = m15.iloc[-1]
+    if len(recent) == 0:
+        return None
 
     if direction == "buy":
         retrace_low = float(recent["low"].min())
-        shallow = retrace_low >= impulse_close - ((impulse_close - impulse_open) * 0.5)
-        confirm = float(last["close"])
-        if shallow and float(last["close"]) > float(m15["ema20"].iloc[-1]):
+        max_retrace = impulse_close - ((impulse_close - impulse_open) * 0.5)
+        shallow = retrace_low >= max_retrace
+        confirm = float(last["close"]) > float(m15["ema20"].iloc[-1])
+        if shallow and confirm:
             return _make_candidate(
                 "impulse_continuation",
                 "buy",
                 float(last["close"]),
                 retrace_low,
-                impulse_high + max(impulse_high - impulse_low, 12.0),
+                impulse_high + max(impulse_high - impulse_low, 10.0),
                 "Strong upside impulse followed by shallow retracement and hold.",
                 regime,
             )
     else:
         retrace_high = float(recent["high"].max())
-        shallow = retrace_high <= impulse_close + ((impulse_open - impulse_close) * 0.5)
-        if shallow and float(last["close"]) < float(m15["ema20"].iloc[-1]):
+        max_retrace = impulse_close + ((impulse_open - impulse_close) * 0.5)
+        shallow = retrace_high <= max_retrace
+        confirm = float(last["close"]) < float(m15["ema20"].iloc[-1])
+        if shallow and confirm:
             return _make_candidate(
                 "impulse_continuation",
                 "sell",
                 float(last["close"]),
                 retrace_high,
-                impulse_low - max(impulse_high - impulse_low, 12.0),
+                impulse_low - max(impulse_high - impulse_low, 10.0),
                 "Strong downside impulse followed by shallow retracement and hold.",
                 regime,
             )
@@ -463,15 +495,15 @@ def detect_impulse_continuation(symbol, direction, regime):
 
 
 def _priority(candidate):
-    order = {
+    priority_map = {
         "breakout_retest": 1,
         "breakout_continuation": 2,
         "failed_bounce_continuation": 3,
-        "trend_pullback": 4,
-        "liquidity_reversal": 5,
+        "liquidity_reversal": 4,
+        "trend_pullback": 5,
         "impulse_continuation": 6,
     }
-    return order.get(candidate.get("setup_type"), 99)
+    return priority_map.get(candidate["setup_type"], 99)
 
 
 def build_trade_plan(candidate, snapshot):
@@ -480,22 +512,22 @@ def build_trade_plan(candidate, snapshot):
     entry = float(tick.ask if direction == "buy" else tick.bid)
     daily_atr = float(snapshot["daily_atr_14"])
     h4_atr = float(snapshot["h4_atr_14"])
-    buffer_size = max(daily_atr * 0.08, h4_atr * 0.12, 0.6)
+    buffer_size = max(daily_atr * 0.08, h4_atr * 0.12, 0.5)
 
     if direction == "buy":
         sl = float(candidate["invalidation_level"]) - buffer_size
-        risk = max(entry - sl, 0.6)
-        tp1 = max(float(candidate["target_level"]), entry + risk * TP_RR)
-        tp2 = max(tp1 + risk * 0.8, entry + risk * (TP_RR + 0.8))
+        risk = max(entry - sl, 0.5)
+        tp_anchor = max(float(candidate["target_level"]), entry + risk * TP_RR)
+        tp2 = max(tp_anchor + risk * 0.8, entry + risk * (TP_RR + 0.8))
     else:
         sl = float(candidate["invalidation_level"]) + buffer_size
-        risk = max(sl - entry, 0.6)
-        tp1 = min(float(candidate["target_level"]), entry - risk * TP_RR)
-        tp2 = min(tp1 - risk * 0.8, entry - risk * (TP_RR + 0.8))
+        risk = max(sl - entry, 0.5)
+        tp_anchor = min(float(candidate["target_level"]), entry - risk * TP_RR)
+        tp2 = min(tp_anchor - risk * 0.8, entry - risk * (TP_RR + 0.8))
 
     candidate["entry"] = round(entry, 2)
     candidate["sl"] = round(sl, 2)
-    candidate["tp"] = round(tp1, 2)
+    candidate["tp"] = round(tp_anchor, 2)
     candidate["tp2"] = round(tp2, 2)
     return candidate
 
@@ -505,34 +537,37 @@ def get_market_snapshot(symbol):
     h4 = get_rates(symbol, mt5.TIMEFRAME_H4, 80)
     m15 = get_rates(symbol, mt5.TIMEFRAME_M15, 120)
     m5 = get_rates(symbol, mt5.TIMEFRAME_M5, 120)
-
     tick = get_tick(symbol)
     d1_atr = atr(d1, 14)
     h4_atr = atr(h4, 14)
     m5_vwap = get_intraday_vwap(m5)
-
+    regime = classify_regime(symbol)
+    bias = market_bias(symbol)
     recent_high = float(m15["high"].iloc[-20:].max())
     recent_low = float(m15["low"].iloc[-20:].min())
+    recent_range = recent_high - recent_low
 
     return {
         "symbol": symbol,
         "current_bid": round(float(tick.bid), 2),
         "current_ask": round(float(tick.ask), 2),
-        "bias": market_bias(symbol),
-        "regime": classify_regime(symbol),
+        "bias": bias,
+        "regime": regime,
         "today_open": round(float(d1["open"].iloc[-1]), 2),
         "today_high": round(float(d1["high"].iloc[-1]), 2),
         "today_low": round(float(d1["low"].iloc[-1]), 2),
         "m15_last_close": round(float(m15["close"].iloc[-1]), 2),
+        "m15_last_high": round(float(m15["high"].iloc[-1]), 2),
+        "m15_last_low": round(float(m15["low"].iloc[-1]), 2),
         "m5_last_close": round(float(m5["close"].iloc[-1]), 2),
-        "m5_vwap": round(float(m5_vwap.iloc[-1]), 2),
         "m5_last_bar_time": str(m5["time"].iloc[-1]),
+        "m5_vwap": round(float(m5_vwap.iloc[-1]), 2),
         "daily_atr_14": d1_atr,
         "h4_atr_14": h4_atr,
         "recent_structure": {
             "recent_high": round(recent_high, 2),
             "recent_low": round(recent_low, 2),
-            "recent_range": round(recent_high - recent_low, 2),
+            "recent_range": round(recent_range, 2),
         },
     }
 
@@ -547,9 +582,9 @@ def generate_setup_candidates(symbol):
         directions.append("buy")
     elif bias == "bearish" and not BUY_ONLY:
         directions.append("sell")
-    elif bias in ["sideways"] and not BUY_ONLY:
+    elif bias == "sideways" and not BUY_ONLY:
         directions.extend(["buy", "sell"])
-    elif bias in ["sideways"] and BUY_ONLY:
+    elif bias == "sideways" and BUY_ONLY:
         directions.append("buy")
 
     candidates = []
@@ -557,8 +592,8 @@ def generate_setup_candidates(symbol):
         detect_breakout_retest,
         detect_breakout_continuation,
         detect_failed_bounce_continuation,
-        detect_trend_pullback,
         detect_liquidity_reversal,
+        detect_trend_pullback,
         detect_impulse_continuation,
     ]
 

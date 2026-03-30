@@ -26,14 +26,12 @@ def _extract_json(text):
     raw = match.group(0)
     if raw.count("{") > raw.count("}"):
         raw = raw + ("}" * (raw.count("{") - raw.count("}")))
-
     raw = re.sub(r",\s*}", "}", raw)
     raw = re.sub(r",\s*]", "]", raw)
-
     return json.loads(raw)
 
 
-def _basic_call(prompt, max_tokens=220):
+def _basic_call(prompt, max_tokens=240):
     response = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=max_tokens,
@@ -44,6 +42,7 @@ def _basic_call(prompt, max_tokens=220):
     text = "".join(
         block.text for block in response.content if getattr(block, "type", None) == "text"
     ).strip()
+
     return _extract_json(text)
 
 
@@ -65,10 +64,11 @@ def _web_call(prompt, max_tokens=260):
     text = "".join(
         block.text for block in response.content if getattr(block, "type", None) == "text"
     ).strip()
+
     return _extract_json(text)
 
 
-def _call_json(prompt, max_tokens=220, use_web=False, fallback=None):
+def _call_json(prompt, max_tokens=240, use_web=False, fallback=None):
     try:
         if use_web and USE_CLAUDE_WEB_SEARCH:
             return _web_call(prompt, max_tokens=max_tokens)
@@ -80,41 +80,27 @@ def _call_json(prompt, max_tokens=220, use_web=False, fallback=None):
 
 
 def evaluate_setup(payload):
-    fallback = {
-        "trade": False,
-        "direction": "none",
-        "score": 0,
-        "regime": "unclear",
-        "reason": "Model response was unclear, so Gold Master is standing aside.",
-        "sl_valid": False,
-        "tp_valid": False,
-    }
-
     prompt = """
 You are Gold Master's professional XAUUSD execution reviewer.
 
 You are reviewing one PRE-BUILT intraday gold trade candidate.
 You do not invent trades.
-You must reject weak, late, overstretched, sideways, low-RR, or structurally poor setups.
+You must reject weak, late, overstretched, sideways, low-RR, off-session, or structurally poor setups.
 
 Critical review rules:
-- Reject trend_pullback if regime is sideways.
+- Reject trend_pullback if regime is sideways or sideways_compression.
 - Reject impulse_continuation if regime is sideways or price is already stretched.
-- Reject breakout_continuation if move is already too extended from VWAP or breakout level.
-- Reject setups with poor stop-loss placement.
-- Reject setups with unrealistic same-day targets.
-- Reject off-session setups unless structure is exceptionally clean.
+- Reject breakout_continuation if the move is already too extended from VWAP or the breakout level.
+- Reject off-session continuation setups unless they are exceptionally clean.
+- Keep the reason VERY short: max 18 words.
 - If uncertain, reject.
 
-Return JSON only.
-Keep the reason VERY short: maximum 18 words.
-
-Return exactly:
+Return JSON only:
 {
   "trade": true_or_false,
   "direction": "buy|sell|none",
   "score": 0,
-  "regime": "trend_pullback|breakout_continuation|breakout_retest|liquidity_reversal|failed_bounce_continuation|impulse_continuation|sideways|unclear",
+  "regime": "trend_pullback|breakout_continuation|breakout_retest|failed_bounce_continuation|liquidity_reversal|impulse_continuation|sideways|unclear",
   "reason": "max 18 words",
   "sl_valid": true_or_false,
   "tp_valid": true_or_false
@@ -124,7 +110,18 @@ Payload:
 {payload_json}
 """.replace("{payload_json}", json.dumps(payload, indent=2))
 
+    fallback = {
+        "trade": False,
+        "direction": "none",
+        "score": 0,
+        "regime": "unclear",
+        "reason": "No trade.",
+        "sl_valid": False,
+        "tp_valid": False,
+    }
+
     result = _call_json(prompt, max_tokens=220, use_web=False, fallback=fallback)
+
     result.setdefault("trade", False)
     result.setdefault("direction", "none")
     result.setdefault("score", 0)
@@ -135,51 +132,45 @@ Payload:
 
     if result["direction"] not in ["buy", "sell", "none"]:
         result["direction"] = "none"
+
     try:
         result["score"] = int(result["score"])
     except Exception:
         result["score"] = 0
     result["score"] = max(0, min(100, result["score"]))
+
     if not isinstance(result["trade"], bool):
         result["trade"] = False
     if not isinstance(result["sl_valid"], bool):
         result["sl_valid"] = False
     if not isinstance(result["tp_valid"], bool):
         result["tp_valid"] = False
+
     return result
 
 
 def daily_market_analysis(payload, use_web=False):
-    fallback = {
-        "bias": payload.get("market_snapshot", {}).get("bias", "sideways"),
-        "summary": "Gold is mixed for now, so I’m waiting for cleaner structure before leaning too hard either way.",
-        "expected_high": 0,
-        "expected_low": 0,
-        "key_level_up": 0,
-        "key_level_down": 0,
-    }
-
     prompt = """
 You are Gold Master's XAUUSD market analyst.
 
 You are given:
 - a structured market snapshot
-- the bot's persistent local state
-- a context such as startup, session_open, pulse_update, or macro_update
+- persistent prior context from the local state store
+- a context such as startup, session_open, pulse_update, or market_closed
 
 If web search is available, use it only to verify fresh macro context relevant to gold, the US dollar, yields, inflation, central banks, or major geopolitical developments.
 
 Your task:
-1. Decide whether the market currently looks bullish, bearish, or sideways.
-2. Keep continuity with prior watched levels if they still matter.
+1. Decide whether the market currently looks bullish, bearish, sideways, or closed.
+2. Keep continuity with earlier watched levels if they still matter.
 3. Give a concise trader-friendly summary.
-4. Estimate an expected high and expected low as scenario levels.
+4. Estimate an expected high and expected low as scenario levels only if the market is open.
 5. Provide one key upside level and one key downside level.
 6. Keep the tone human and practical.
 
 Return JSON only:
 {
-  "bias": "bullish|bearish|sideways",
+  "bias": "bullish|bearish|sideways|closed",
   "summary": "2-4 short sentences in natural human language",
   "expected_high": 0,
   "expected_low": 0,
@@ -191,7 +182,17 @@ Payload:
 {payload_json}
 """.replace("{payload_json}", json.dumps(payload, indent=2))
 
+    fallback = {
+        "bias": "sideways",
+        "summary": "Gold is mixed for now, so I’m waiting for cleaner structure before leaning too hard either way.",
+        "expected_high": 0,
+        "expected_low": 0,
+        "key_level_up": 0,
+        "key_level_down": 0,
+    }
+
     result = _call_json(prompt, max_tokens=260, use_web=use_web, fallback=fallback)
+
     result.setdefault("bias", "sideways")
     result.setdefault("summary", fallback["summary"])
     result.setdefault("expected_high", 0)
@@ -202,12 +203,10 @@ Payload:
 
 
 def macro_news_brief(payload, use_web=True):
-    fallback = {"has_update": False, "headline": "", "impact_note": ""}
-
     prompt = """
 You are Gold Master's macro commentator for XAUUSD.
 
-Use web search if available to check for fresh macro or geopolitical developments relevant to gold.
+Use web search if available to check for fresh macro or geopolitical developments relevant to intraday gold.
 Focus only on meaningful drivers:
 - Federal Reserve
 - US dollar
@@ -230,36 +229,9 @@ Payload:
 {payload_json}
 """.replace("{payload_json}", json.dumps(payload, indent=2))
 
-    result = _call_json(prompt, max_tokens=180, use_web=use_web, fallback=fallback)
+    fallback = {"has_update": False, "headline": "", "impact_note": ""}
+    result = _call_json(prompt, max_tokens=220, use_web=use_web, fallback=fallback)
     result.setdefault("has_update", False)
     result.setdefault("headline", "")
     result.setdefault("impact_note", "")
-    return result
-
-
-def signal_macro_veto(payload, use_web=True):
-    fallback = {"block_trade": False, "reason": ""}
-
-    prompt = """
-You are Gold Master's macro veto reviewer for XAUUSD.
-
-You are given a strong technical trade candidate.
-Use web search if available to check only for fresh macro or geopolitical developments that may conflict with this intraday setup.
-
-Return JSON only:
-{
-  "block_trade": true_or_false,
-  "reason": "max 18 words"
-}
-
-Block only if the fresh macro context strongly conflicts with the trade direction.
-If there is no strong conflict, return block_trade=false.
-
-Payload:
-{payload_json}
-""".replace("{payload_json}", json.dumps(payload, indent=2))
-
-    result = _call_json(prompt, max_tokens=120, use_web=use_web, fallback=fallback)
-    result.setdefault("block_trade", False)
-    result.setdefault("reason", "")
     return result

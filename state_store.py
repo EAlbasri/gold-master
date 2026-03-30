@@ -11,8 +11,11 @@ def _default_state():
         "watched_levels": {},
         "last_macro_headline": "",
         "last_signal": {},
-        "last_reviewed_m5_bar": "",
-        "candidate_rejections": {},
+        "session_marks": {},
+        "last_m5_bar_time": "",
+        "rejected_candidates": {},
+        "last_market_closed_note": "",
+        "last_market_open_note": "",
     }
 
 
@@ -43,33 +46,36 @@ def candidate_fingerprint(candidate):
     )
 
 
-def remember_rejection(state, candidate, reason):
-    state["candidate_rejections"][candidate_fingerprint(candidate)] = {
+def is_candidate_on_cooldown(state, candidate, now_dt):
+    fp = candidate_fingerprint(candidate)
+    item = state.get("rejected_candidates", {}).get(fp)
+    if not item:
+        return False
+    try:
+        ts = datetime.fromisoformat(item["timestamp"])
+    except Exception:
+        return False
+    return now_dt - ts < timedelta(minutes=REJECTION_COOLDOWN_MINUTES)
+
+
+def mark_candidate_rejected(state, candidate, now_dt, reason="rejected"):
+    fp = candidate_fingerprint(candidate)
+    if "rejected_candidates" not in state:
+        state["rejected_candidates"] = {}
+    state["rejected_candidates"][fp] = {
+        "timestamp": now_dt.isoformat(),
         "reason": reason,
-        "timestamp": datetime.utcnow().isoformat(),
     }
 
 
-def is_rejection_cooled_down(state, candidate):
-    fp = candidate_fingerprint(candidate)
-    data = state.get("candidate_rejections", {}).get(fp)
-    if not data:
-        return False
-    try:
-        ts = datetime.fromisoformat(data["timestamp"])
-    except Exception:
-        return False
-    return datetime.utcnow() - ts < timedelta(minutes=REJECTION_COOLDOWN_MINUTES)
-
-
-def prune_rejections(state):
-    pruned = {}
-    for fp, data in state.get("candidate_rejections", {}).items():
+def prune_rejections(state, now_dt):
+    kept = {}
+    for fp, item in state.get("rejected_candidates", {}).items():
         try:
-            ts = datetime.fromisoformat(data["timestamp"])
-            if datetime.utcnow() - ts < timedelta(minutes=REJECTION_COOLDOWN_MINUTES):
-                pruned[fp] = data
+            ts = datetime.fromisoformat(item.get("timestamp", ""))
         except Exception:
             continue
-    state["candidate_rejections"] = pruned
+        if now_dt - ts < timedelta(minutes=REJECTION_COOLDOWN_MINUTES):
+            kept[fp] = item
+    state["rejected_candidates"] = kept
     return state

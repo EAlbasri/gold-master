@@ -11,10 +11,8 @@ def _send(payload):
         print("Telegram not configured.")
         return False
 
-    url = "{0}/sendMessage".format(TELEGRAM_BASE_URL)
-
     try:
-        response = requests.post(url, json=payload, timeout=20)
+        response = requests.post("{0}/sendMessage".format(TELEGRAM_BASE_URL), json=payload, timeout=20)
         response.raise_for_status()
         data = response.json()
         if not data.get("ok", False):

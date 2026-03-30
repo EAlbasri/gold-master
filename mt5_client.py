@@ -79,16 +79,14 @@ def _send_order(symbol, lot, order_type, price, sl, tp, deviation=20, comment="g
         "sl": sl,
         "tp": tp,
         "deviation": deviation,
-        "magic": 20260326,
+        "magic": 20260329,
         "comment": comment,
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": mt5.ORDER_FILLING_IOC,
     }
-
     check = mt5.order_check(request)
     if check is None:
         raise RuntimeError("order_check failed: {0}".format(mt5.last_error()))
-
     return mt5.order_send(request)
 
 

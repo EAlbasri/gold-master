@@ -1,4 +1,3 @@
-import os
 import time
 from datetime import datetime, timedelta
 
@@ -7,22 +6,19 @@ try:
 except ImportError:
     from backports.zoneinfo import ZoneInfo
 
-from anthropic_client import daily_market_analysis, evaluate_setup, macro_news_brief, signal_macro_veto
+from anthropic_client import daily_market_analysis, evaluate_setup, macro_news_brief
 from config import (
     AUTO_EXECUTE,
+    BUY_ONLY,
+    CLOSED_LOOP_SLEEP_SECONDS,
     COOLDOWN_MINUTES,
-    ENABLE_MACRO_UPDATES,
-    ENABLE_PULSE_UPDATES,
-    ENABLE_SESSION_UPDATES,
-    ENABLE_SIGNAL_MACRO_VETO,
-    ENABLE_STARTUP_UPDATE,
-    ENABLE_WEB_MACRO_UPDATE,
+    ENABLE_WEB_NEWS_STYLE_UPDATE,
     ENABLE_WEB_PULSE_UPDATE,
     ENABLE_WEB_SESSION_UPDATE,
+    ENABLE_WEB_SIGNAL_VETO,
     ENABLE_WEB_STARTUP_UPDATE,
-    LOG_LEVEL,
-    M5_REVIEW_ON_NEW_BAR_ONLY,
-    MACRO_UPDATE_MINUTES,
+    MARKET_CLOSE_FRIDAY_UTC,
+    MARKET_OPEN_SUNDAY_UTC,
     MAX_CANDIDATES_PER_SCAN,
     MAX_DAILY_LOSS,
     MAX_OPEN_TRADES,
@@ -30,6 +26,7 @@ from config import (
     MIN_EXECUTION_SCORE,
     MIN_RR,
     MIN_SIGNAL_SCORE,
+    NEWS_STYLE_UPDATE_MINUTES,
     PULSE_UPDATE_MINUTES,
     RISK_PER_TRADE,
     SCAN_INTERVAL_SECONDS,
@@ -37,14 +34,30 @@ from config import (
     SIGNAL_MACRO_VETO_THRESHOLD,
     SYMBOL,
 )
-from mt5_client import connect, ensure_connection, get_account_info, get_open_positions, place_buy, place_sell, shutdown
+from mt5_client import (
+    connect,
+    ensure_connection,
+    get_account_info,
+    get_open_positions,
+    place_buy,
+    place_sell,
+    shutdown,
+)
 from risk import calc_lot_size
-from state_store import candidate_fingerprint, is_rejection_cooled_down, load_state, prune_rejections, remember_rejection, save_state
+from state_store import (
+    is_candidate_on_cooldown,
+    load_state,
+    mark_candidate_rejected,
+    prune_rejections,
+    save_state,
+)
 from strategy import generate_setup_candidates, get_market_snapshot, spread_ok
 from telegram_client import send_human_update, send_structured_signal
 
 
 BHR_TZ = ZoneInfo("Asia/Bahrain")
+UTC_TZ = ZoneInfo("UTC")
+
 SESSION_DEFS = {
     "Asia": {"tz": ZoneInfo("Asia/Tokyo"), "hour": 9, "minute": 0},
     "London": {"tz": ZoneInfo("Europe/London"), "hour": 8, "minute": 0},
@@ -54,7 +67,7 @@ SESSION_DEFS = {
 LAST_SIGNAL_AT = None
 LAST_SIGNAL_SIDE = None
 LAST_PULSE_AT = None
-LAST_MACRO_AT = None
+LAST_NEWS_STYLE_AT = None
 LAST_SESSION_SENT = {}
 
 
@@ -62,9 +75,29 @@ def now_bahrain():
     return datetime.now(BHR_TZ)
 
 
-def log(message):
-    if LOG_LEVEL.upper() == "DEBUG":
-        print(message)
+def now_utc():
+    return datetime.now(UTC_TZ)
+
+
+def _parse_hhmm(value):
+    parts = value.split(":")
+    return int(parts[0]), int(parts[1])
+
+
+def market_is_open(dt_utc=None):
+    dt_utc = dt_utc or now_utc()
+    weekday = dt_utc.weekday()  # Mon=0 Sun=6
+    sun_h, sun_m = _parse_hhmm(MARKET_OPEN_SUNDAY_UTC)
+    fri_h, fri_m = _parse_hhmm(MARKET_CLOSE_FRIDAY_UTC)
+    minutes = dt_utc.hour * 60 + dt_utc.minute
+
+    if weekday == 5:
+        return False
+    if weekday == 6:
+        return minutes >= (sun_h * 60 + sun_m)
+    if weekday == 4:
+        return minutes < (fri_h * 60 + fri_m)
+    return True
 
 
 def current_session_name():
@@ -82,15 +115,6 @@ def current_session_name():
     return "Off-session"
 
 
-def get_time_greeting():
-    hour = now_bahrain().hour
-    if hour < 12:
-        return "Good morning"
-    if hour < 18:
-        return "Good afternoon"
-    return "Good evening"
-
-
 def build_analysis_bundle(context, use_web):
     state = load_state()
     snapshot = get_market_snapshot(SYMBOL)
@@ -102,25 +126,33 @@ def build_analysis_bundle(context, use_web):
             "watched_levels": state.get("watched_levels", {}),
             "last_signal": state.get("last_signal", {}),
             "session": current_session_name(),
+            "market_open": market_is_open(),
         },
     }
     analysis = daily_market_analysis(payload, use_web=use_web)
-
     state["last_analysis"] = {
-        "timestamp": now_bahrain().isoformat(),
         "context": context,
+        "timestamp": now_bahrain().isoformat(),
         "bias": analysis.get("bias"),
         "summary": analysis.get("summary"),
     }
     state["watched_levels"] = {
-        "expected_high": analysis.get("expected_high"),
-        "expected_low": analysis.get("expected_low"),
         "key_level_up": analysis.get("key_level_up"),
         "key_level_down": analysis.get("key_level_down"),
+        "expected_high": analysis.get("expected_high"),
+        "expected_low": analysis.get("expected_low"),
     }
     save_state(state)
+    return {"snapshot": snapshot, "analysis": analysis, "state": state}
 
-    return {"snapshot": snapshot, "analysis": analysis}
+
+def get_time_greeting():
+    hour = now_bahrain().hour
+    if hour < 12:
+        return "Good morning"
+    if hour < 18:
+        return "Good afternoon"
+    return "Good evening"
 
 
 def build_welcome_message(bundle):
@@ -141,7 +173,7 @@ def build_welcome_message(bundle):
         "{9}"
     ).format(
         get_time_greeting(),
-        analysis.get("bias", snapshot.get("bias", "sideways")).upper(),
+        analysis.get("bias", "sideways").upper(),
         snapshot.get("regime", "unknown"),
         analysis.get("expected_high", "N/A"),
         analysis.get("expected_low", "N/A"),
@@ -150,6 +182,31 @@ def build_welcome_message(bundle):
         snapshot.get("current_bid"),
         snapshot.get("current_ask"),
         analysis.get("summary", "I’m watching structure, regime, and session flow before I get aggressive."),
+    )
+
+
+def build_market_closed_message():
+    return (
+        "Gold Master here.\n\n"
+        "The market is closed right now, so I’m standing down on fresh trade calls and commentary until the next open."
+    )
+
+
+def build_market_reopen_message(bundle):
+    snapshot = bundle["snapshot"]
+    analysis = bundle["analysis"]
+    return (
+        "Gold Master is back on the desk — the market is open again.\n\n"
+        "Current bid/ask: {0} / {1}\n"
+        "Bias: {2}\n"
+        "Regime: {3}\n\n"
+        "{4}"
+    ).format(
+        snapshot.get("current_bid"),
+        snapshot.get("current_ask"),
+        analysis.get("bias", "sideways").upper(),
+        snapshot.get("regime", "unknown"),
+        analysis.get("summary", "I’m re-checking structure and macro context before leaning into anything."),
     )
 
 
@@ -167,7 +224,7 @@ def build_session_message(session_name, bundle):
         "{7}"
     ).format(
         session_name,
-        analysis.get("bias", snapshot.get("bias", "sideways")).upper(),
+        analysis.get("bias", "sideways").upper(),
         snapshot.get("regime", "unknown"),
         snapshot.get("current_bid"),
         snapshot.get("current_ask"),
@@ -182,13 +239,13 @@ def build_pulse_message(bundle):
     snapshot = bundle["snapshot"]
     return (
         "Quick check-in from Gold Master.\n\n"
-        "Gold is trading around {0} / {1} and the broader tone looks {2}.\n"
-        "Current regime: {3}.\n"
+        "Gold is currently trading around {0} / {1} and the broader tone still looks {2}.\n"
+        "The current regime reads as {3}.\n"
         "{4}"
     ).format(
         snapshot.get("current_bid"),
         snapshot.get("current_ask"),
-        analysis.get("bias", snapshot.get("bias", "sideways")),
+        analysis.get("bias", "sideways"),
         snapshot.get("regime", "unknown"),
         analysis.get("summary", "I’m staying patient and waiting for the cleanest structure."),
     )
@@ -239,38 +296,64 @@ def get_session_open_bahrain(session_name, current_bhr):
     return local_open.astimezone(BHR_TZ)
 
 
+def maybe_send_market_open_close_notes():
+    state = load_state()
+    market_open = market_is_open()
+    current_day = now_utc().strftime("%Y-%m-%d")
+
+    if not market_open and state.get("last_market_closed_note") != current_day:
+        send_human_update(build_market_closed_message())
+        state["last_market_closed_note"] = current_day
+        save_state(state)
+
+    if market_open and state.get("last_market_open_note") != current_day:
+        bundle = build_analysis_bundle(context="market_reopen", use_web=ENABLE_WEB_STARTUP_UPDATE)
+        send_human_update(build_market_reopen_message(bundle))
+        state["last_market_open_note"] = current_day
+        save_state(state)
+
+
 def maybe_send_session_updates():
-    if not ENABLE_SESSION_UPDATES:
+    if not market_is_open():
         return
+
     current_bhr = now_bahrain()
     for session_name in SESSION_DEFS:
         open_bhr = get_session_open_bahrain(session_name, current_bhr)
         session_key = "{0}:{1}".format(session_name, open_bhr.strftime("%Y-%m-%d %H:%M"))
         in_window = open_bhr <= current_bhr < open_bhr + timedelta(minutes=SESSION_WINDOW_MINUTES)
-        if in_window and not LAST_SESSION_SENT.get(session_key, False):
-            bundle = build_analysis_bundle("{0}_session_open".format(session_name.lower()), ENABLE_WEB_SESSION_UPDATE)
+        already_sent = LAST_SESSION_SENT.get(session_key, False)
+        if in_window and not already_sent:
+            bundle = build_analysis_bundle(context="{0}_session_open".format(session_name.lower()), use_web=ENABLE_WEB_SESSION_UPDATE)
             send_human_update(build_session_message(session_name, bundle))
             LAST_SESSION_SENT[session_key] = True
 
 
 def maybe_send_pulse_update():
     global LAST_PULSE_AT
-    if not ENABLE_PULSE_UPDATES:
+    if not market_is_open():
         return
+    if current_session_name() == "Off-session":
+        return
+
     current_bhr = now_bahrain()
     if LAST_PULSE_AT and current_bhr - LAST_PULSE_AT < timedelta(minutes=PULSE_UPDATE_MINUTES):
         return
-    bundle = build_analysis_bundle("pulse_update", ENABLE_WEB_PULSE_UPDATE)
+
+    bundle = build_analysis_bundle(context="pulse_update", use_web=ENABLE_WEB_PULSE_UPDATE)
     send_human_update(build_pulse_message(bundle))
     LAST_PULSE_AT = current_bhr
 
 
 def maybe_send_macro_note():
-    global LAST_MACRO_AT
-    if not ENABLE_MACRO_UPDATES:
+    global LAST_NEWS_STYLE_AT
+    if not market_is_open():
         return
+    if current_session_name() == "Off-session":
+        return
+
     current_bhr = now_bahrain()
-    if LAST_MACRO_AT and current_bhr - LAST_MACRO_AT < timedelta(minutes=MACRO_UPDATE_MINUTES):
+    if LAST_NEWS_STYLE_AT and current_bhr - LAST_NEWS_STYLE_AT < timedelta(minutes=NEWS_STYLE_UPDATE_MINUTES):
         return
 
     state = load_state()
@@ -282,15 +365,17 @@ def maybe_send_macro_note():
             "persistent_state": state,
             "context": "macro_update",
         },
-        use_web=ENABLE_WEB_MACRO_UPDATE,
+        use_web=ENABLE_WEB_NEWS_STYLE_UPDATE,
     )
+
     if brief.get("has_update", False):
         headline = brief.get("headline", "")
         if headline and headline != state.get("last_macro_headline", ""):
             send_human_update(build_macro_note(brief))
             state["last_macro_headline"] = headline
             save_state(state)
-    LAST_MACRO_AT = current_bhr
+
+    LAST_NEWS_STYLE_AT = current_bhr
 
 
 def can_send_signal(direction):
@@ -326,6 +411,17 @@ def daily_loss_limit_hit():
     return drawdown >= MAX_DAILY_LOSS
 
 
+def is_new_m5_bar(snapshot):
+    state = load_state()
+    current_bar = snapshot.get("m5_last_bar_time", "")
+    last_bar = state.get("last_m5_bar_time", "")
+    if current_bar != last_bar:
+        state["last_m5_bar_time"] = current_bar
+        save_state(state)
+        return True
+    return False
+
+
 def should_send_candidate_to_claude(candidate, snapshot):
     regime = snapshot.get("regime", "sideways")
     setup_type = candidate.get("setup_type", "")
@@ -335,54 +431,71 @@ def should_send_candidate_to_claude(candidate, snapshot):
     tp = float(candidate.get("tp", 0))
     vwap = float(snapshot.get("m5_vwap", 0))
     recent_range = float(snapshot.get("recent_structure", {}).get("recent_range", 0))
-    current_price = float(snapshot.get("current_ask") if direction == "buy" else snapshot.get("current_bid"))
+    session_name = current_session_name()
+    current_price = entry
 
     risk = abs(entry - sl)
     reward = abs(tp - entry)
     rr = reward / risk if risk > 0 else 0
+
+    if risk <= 0 or reward <= 0:
+        return False, "bad_geometry"
     if rr < MIN_RR:
         return False, "rr_too_low"
 
     if regime in ["sideways", "sideways_compression"]:
         if setup_type in ["trend_pullback", "impulse_continuation", "failed_bounce_continuation"]:
             return False, "wrong_regime"
-        if recent_range < 18 and setup_type == "breakout_continuation":
+        if setup_type == "breakout_continuation" and recent_range < 18:
             return False, "range_too_small"
 
-    if direction == "buy" and current_price > vwap + 45 and setup_type == "breakout_continuation":
-        return False, "too_far_above_vwap"
-    if direction == "sell" and current_price < vwap - 45 and setup_type == "breakout_continuation":
-        return False, "too_far_below_vwap"
+    if session_name == "Off-session" and setup_type in [
+        "breakout_continuation",
+        "failed_bounce_continuation",
+        "impulse_continuation",
+    ]:
+        return False, "off_session"
+
+    vwap_distance = abs(current_price - vwap)
+    if vwap_distance > max(snapshot.get("daily_atr_14", 0) * 0.22, 16):
+        return False, "too_far_from_vwap"
 
     if risk > max(snapshot.get("daily_atr_14", 0) * 0.45, 22):
         return False, "risk_too_wide"
 
-    if current_session_name() == "Off-session" and setup_type not in ["breakout_retest", "liquidity_reversal"]:
-        return False, "off_session"
+    if setup_type == "breakout_continuation":
+        trigger = float(candidate.get("trigger_level", entry))
+        if abs(entry - trigger) > max(risk * 0.8, 10):
+            return False, "late_breakout"
 
     return True, "ok"
 
 
-def review_candidates(snapshot, candidates):
-    state = prune_rejections(load_state())
+def scan_for_setup():
+    if not market_is_open():
+        return None
+    if not spread_ok(SYMBOL, MAX_SPREAD_POINTS):
+        return None
+
+    snapshot, candidates = generate_setup_candidates(SYMBOL)
+    if not is_new_m5_bar(snapshot):
+        return None
+
+    if not candidates:
+        return None
+
+    state = load_state()
+    state = prune_rejections(state, now_bahrain())
     save_state(state)
-
-    if M5_REVIEW_ON_NEW_BAR_ONLY:
-        current_bar = snapshot.get("m5_last_bar_time", "")
-        last_reviewed = state.get("last_reviewed_m5_bar", "")
-        if current_bar and current_bar == last_reviewed:
-            return None
-        state["last_reviewed_m5_bar"] = current_bar
-        save_state(state)
-
     best = None
+
     for candidate in candidates[:MAX_CANDIDATES_PER_SCAN]:
-        if is_rejection_cooled_down(state, candidate):
+        if is_candidate_on_cooldown(state, candidate, now_bahrain()):
             continue
 
-        ok, local_reason = should_send_candidate_to_claude(candidate, snapshot)
+        ok, reject_reason = should_send_candidate_to_claude(candidate, snapshot)
         if not ok:
-            remember_rejection(state, candidate, local_reason)
+            mark_candidate_rejected(state, candidate, now_bahrain(), reject_reason)
             save_state(state)
             continue
 
@@ -397,44 +510,60 @@ def review_candidates(snapshot, candidates):
                 "watched_levels": state.get("watched_levels", {}),
                 "last_signal": state.get("last_signal", {}),
                 "session": current_session_name(),
+                "market_open": market_is_open(),
             },
         }
+
         verdict = evaluate_setup(payload)
         candidate["verdict"] = verdict
         candidate["snapshot"] = snapshot
 
         if not bool(verdict.get("trade", False)):
-            remember_rejection(state, candidate, verdict.get("reason", "rejected"))
+            mark_candidate_rejected(state, candidate, now_bahrain(), "claude_reject")
             save_state(state)
             continue
+
         if int(verdict.get("score", 0)) < MIN_SIGNAL_SCORE:
-            remember_rejection(state, candidate, "score_too_low")
+            mark_candidate_rejected(state, candidate, now_bahrain(), "score_too_low")
             save_state(state)
             continue
+
         if best is None or int(verdict.get("score", 0)) > int(best["verdict"].get("score", 0)):
             best = candidate
 
     return best
 
 
-def maybe_apply_macro_veto(setup):
-    if not ENABLE_SIGNAL_MACRO_VETO:
-        return False, ""
-    if int(setup["verdict"].get("score", 0)) < SIGNAL_MACRO_VETO_THRESHOLD:
-        return False, ""
+def maybe_macro_veto(setup):
+    if not ENABLE_WEB_SIGNAL_VETO:
+        return True
+    score = int(setup["verdict"].get("score", 0))
+    if score < SIGNAL_MACRO_VETO_THRESHOLD:
+        return True
 
-    state = load_state()
-    result = signal_macro_veto(
+    brief = macro_news_brief(
         {
             "symbol": SYMBOL,
             "market_snapshot": setup["snapshot"],
-            "candidate": setup,
-            "persistent_state": state,
-            "context": "signal_macro_veto",
+            "candidate": {
+                "setup_type": setup["setup_type"],
+                "direction": setup["direction"],
+                "entry": setup["entry"],
+                "sl": setup["sl"],
+                "tp": setup["tp"],
+            },
+            "context": "signal_veto",
         },
         use_web=True,
     )
-    return result.get("block_trade", False), result.get("reason", "")
+
+    impact = brief.get("impact_note", "").lower()
+    direction = setup["direction"]
+    if direction == "buy" and any(x in impact for x in ["heavy for gold", "bearish for gold", "stronger dollar", "higher yields"]):
+        return False
+    if direction == "sell" and any(x in impact for x in ["supportive for gold", "bullish for gold", "weaker dollar", "falling yields"]):
+        return False
+    return True
 
 
 def maybe_execute_trade(setup):
@@ -445,12 +574,6 @@ def maybe_execute_trade(setup):
     tp_valid = verdict.get("tp_valid", True)
 
     if score >= MIN_SIGNAL_SCORE and can_send_signal(direction):
-        blocked, reason = maybe_apply_macro_veto(setup)
-        if blocked:
-            state = load_state()
-            remember_rejection(state, setup, "macro_veto:{0}".format(reason))
-            save_state(state)
-            return
         send_structured_signal("Gold Master signal", build_signal_lines(setup))
         mark_signal_sent(direction, setup)
 
@@ -459,6 +582,8 @@ def maybe_execute_trade(setup):
     if daily_loss_limit_hit():
         return
     if score < MIN_EXECUTION_SCORE or not sl_valid or not tp_valid:
+        return
+    if not maybe_macro_veto(setup):
         return
 
     open_positions = get_open_positions(SYMBOL)
@@ -475,19 +600,20 @@ def maybe_execute_trade(setup):
     else:
         result = place_sell(SYMBOL, lot=lot, sl=setup["sl"], tp=setup["tp"], comment="gold_master_sell")
 
-    send_structured_signal("Gold Master update — order is in", build_execution_lines(setup, lot, result))
+    send_structured_signal("Gold Master update — order is in", build_signal_lines(setup) + ["", "Volume: {0}".format(lot), "Broker retcode: {0}".format(getattr(result, "retcode", "N/A"))])
 
 
 def send_welcome_message():
-    if not ENABLE_STARTUP_UPDATE:
+    if not market_is_open():
         return
-    bundle = build_analysis_bundle("startup", ENABLE_WEB_STARTUP_UPDATE)
+    bundle = build_analysis_bundle(context="startup", use_web=ENABLE_WEB_STARTUP_UPDATE)
     send_human_update(build_welcome_message(bundle))
 
 
 def run_forever():
     connect()
-    print("Gold Master connected to MT5.")
+    print("Gold Master upgraded engine connected to MT5.")
+
     try:
         send_welcome_message()
     except Exception as e:
@@ -496,16 +622,19 @@ def run_forever():
     while True:
         try:
             ensure_connection()
+            maybe_send_market_open_close_notes()
+
+            if not market_is_open():
+                time.sleep(max(CLOSED_LOOP_SLEEP_SECONDS, 60))
+                continue
+
             maybe_send_session_updates()
             maybe_send_macro_note()
             maybe_send_pulse_update()
 
-            if spread_ok(SYMBOL, MAX_SPREAD_POINTS):
-                snapshot, candidates = generate_setup_candidates(SYMBOL)
-                if candidates:
-                    setup = review_candidates(snapshot, candidates)
-                    if setup:
-                        maybe_execute_trade(setup)
+            setup = scan_for_setup()
+            if setup:
+                maybe_execute_trade(setup)
 
             time.sleep(max(SCAN_INTERVAL_SECONDS, 5))
 
@@ -518,10 +647,6 @@ def run_forever():
             break
         except Exception as e:
             print("Loop error: {0}".format(e))
-            try:
-                send_human_update("Gold Master note: I hit a temporary connection or processing issue and I’m reconnecting.")
-            except Exception:
-                pass
             time.sleep(15)
 
     shutdown()

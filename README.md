@@ -1,22 +1,20 @@
-# Gold Master Intraday Upgrade
+Gold Master upgraded intraday engine.
 
-This version widens the trading engine beyond sweep-reversal entries.
+Highlights:
+- market-hours aware (no weekend / closed-market scanning or commentary)
+- session-aware commentary
+- new M5 bar gating to avoid repeated LLM calls on the same structure
+- local rejection cooldown
+- multi-pattern intraday engine for gold:
+  - breakout continuation
+  - breakout retest
+  - failed-bounce continuation
+  - trend pullback
+  - liquidity reversal
+  - impulse continuation (blocked in sideways regimes)
 
-Included setup families:
-- breakout continuation
-- breakout retest
-- trend pullback
-- liquidity reversal
-- failed-bounce continuation
-- impulse continuation
-
-Cost controls:
-- only reviews the best 2 candidates per scan
-- only asks Claude on a new M5 bar by default
-- rejection cooldown prevents repeated review of the same bad setup
-- macro web-search veto only runs on very strong candidates
-
-Recommended starting mode:
-- AUTO_EXECUTE=false
-- RISK_PER_TRADE=0.005
-- MAX_OPEN_TRADES=1
+Before use:
+1. Rotate any exposed MT5 / Claude / Telegram keys.
+2. Copy env_template.txt to .env and fill your fresh keys.
+3. Keep AUTO_EXECUTE=false until demo validation looks good.
+4. Keep RISK_PER_TRADE=0.005 and MAX_OPEN_TRADES=1.
