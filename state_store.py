@@ -16,6 +16,7 @@ def _default_state():
         "rejected_candidates": {},
         "last_market_closed_note": "",
         "last_market_open_note": "",
+        "last_reviewed_fingerprint": "",
     }
 
 

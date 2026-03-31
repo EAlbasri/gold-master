@@ -6,10 +6,9 @@ try:
 except ImportError:
     from backports.zoneinfo import ZoneInfo
 
-from anthropic_client import daily_market_analysis, evaluate_setup, macro_news_brief
+from anthropic_client import daily_market_analysis, evaluate_setup, macro_news_brief, macro_veto_for_setup
 from config import (
     AUTO_EXECUTE,
-    BUY_ONLY,
     CLOSED_LOOP_SLEEP_SECONDS,
     COOLDOWN_MINUTES,
     ENABLE_WEB_NEWS_STYLE_UPDATE,
@@ -17,6 +16,7 @@ from config import (
     ENABLE_WEB_SESSION_UPDATE,
     ENABLE_WEB_SIGNAL_VETO,
     ENABLE_WEB_STARTUP_UPDATE,
+    LOCAL_REVIEW_MIN_SCORE,
     MARKET_CLOSE_FRIDAY_UTC,
     MARKET_OPEN_SUNDAY_UTC,
     MAX_CANDIDATES_PER_SCAN,
@@ -28,6 +28,7 @@ from config import (
     MIN_SIGNAL_SCORE,
     NEWS_STYLE_UPDATE_MINUTES,
     PULSE_UPDATE_MINUTES,
+    REJECTION_COOLDOWN_MINUTES,
     RISK_PER_TRADE,
     SCAN_INTERVAL_SECONDS,
     SESSION_WINDOW_MINUTES,
@@ -48,8 +49,8 @@ from state_store import (
     is_candidate_on_cooldown,
     load_state,
     mark_candidate_rejected,
-    prune_rejections,
     save_state,
+    prune_rejections,
 )
 from strategy import generate_setup_candidates, get_market_snapshot, spread_ok
 from telegram_client import send_human_update, send_structured_signal
@@ -239,7 +240,7 @@ def build_pulse_message(bundle):
     snapshot = bundle["snapshot"]
     return (
         "Quick check-in from Gold Master.\n\n"
-        "Gold is currently trading around {0} / {1} and the broader tone still looks {2}.\n"
+        "Gold is trading around {0} / {1} and the broader tone looks {2}.\n"
         "The current regime reads as {3}.\n"
         "{4}"
     ).format(
@@ -264,28 +265,14 @@ def build_signal_lines(setup):
         "XAUUSD {0}".format(setup["direction"].upper()),
         "Setup type: {0}".format(setup["setup_type"]),
         "Regime: {0}".format(setup["snapshot"]["regime"]),
+        "Local score: {0}".format(setup.get("local_score", 0)),
+        "Review score: {0}".format(verdict.get("score", 0)),
         "Entry: {0:.2f}".format(setup["entry"]),
         "Stop loss: {0:.2f}".format(setup["sl"]),
         "Take profit 1: {0:.2f}".format(setup["tp"]),
         "Take profit 2: {0:.2f}".format(setup["tp2"]),
         "",
-        "Confidence score: {0}".format(verdict.get("score", 0)),
-        "Trigger level: {0}".format(setup.get("trigger_level")),
-        "",
         "Note: {0}".format(verdict.get("reason", setup.get("notes", "Gold Master likes the structure here."))),
-    ]
-
-
-def build_execution_lines(setup, lot, result):
-    return [
-        "XAUUSD {0}".format(setup["direction"].upper()),
-        "Setup type: {0}".format(setup["setup_type"]),
-        "Volume: {0}".format(lot),
-        "Entry: {0:.2f}".format(setup["entry"]),
-        "Stop loss: {0:.2f}".format(setup["sl"]),
-        "Take profit: {0:.2f}".format(setup["tp"]),
-        "",
-        "Broker retcode: {0}".format(getattr(result, "retcode", "N/A")),
     ]
 
 
@@ -401,6 +388,8 @@ def mark_signal_sent(direction, setup):
         "sl": setup["sl"],
         "tp": setup["tp"],
         "tp2": setup["tp2"],
+        "local_score": setup.get("local_score", 0),
+        "review_score": setup["verdict"].get("score", 0),
     }
     save_state(state)
 
@@ -432,7 +421,6 @@ def should_send_candidate_to_claude(candidate, snapshot):
     vwap = float(snapshot.get("m5_vwap", 0))
     recent_range = float(snapshot.get("recent_structure", {}).get("recent_range", 0))
     session_name = current_session_name()
-    current_price = entry
 
     risk = abs(entry - sl)
     reward = abs(tp - entry)
@@ -444,10 +432,8 @@ def should_send_candidate_to_claude(candidate, snapshot):
         return False, "rr_too_low"
 
     if regime in ["sideways", "sideways_compression"]:
-        if setup_type in ["trend_pullback", "impulse_continuation", "failed_bounce_continuation"]:
+        if setup_type in ["trend_pullback", "impulse_continuation"]:
             return False, "wrong_regime"
-        if setup_type == "breakout_continuation" and recent_range < 18:
-            return False, "range_too_small"
 
     if session_name == "Off-session" and setup_type in [
         "breakout_continuation",
@@ -456,17 +442,22 @@ def should_send_candidate_to_claude(candidate, snapshot):
     ]:
         return False, "off_session"
 
-    vwap_distance = abs(current_price - vwap)
-    if vwap_distance > max(snapshot.get("daily_atr_14", 0) * 0.22, 16):
-        return False, "too_far_from_vwap"
+    vwap_distance = abs(entry - vwap)
+    if regime in ["bullish_expansion", "bearish_expansion"]:
+        if vwap_distance > max(snapshot.get("daily_atr_14", 0) * 0.35, 24):
+            return False, "too_far_from_vwap"
+    else:
+        if vwap_distance > max(snapshot.get("daily_atr_14", 0) * 0.26, 18):
+            return False, "too_far_from_vwap"
 
-    if risk > max(snapshot.get("daily_atr_14", 0) * 0.45, 22):
+    if risk > max(snapshot.get("daily_atr_14", 0) * 0.50, 26):
         return False, "risk_too_wide"
 
-    if setup_type == "breakout_continuation":
-        trigger = float(candidate.get("trigger_level", entry))
-        if abs(entry - trigger) > max(risk * 0.8, 10):
-            return False, "late_breakout"
+    if candidate.get("local_score", 0) < LOCAL_REVIEW_MIN_SCORE:
+        return False, "local_score_too_low"
+
+    if recent_range < 14 and setup_type in ["breakout_continuation", "breakout_retest", "structure_break_retest"]:
+        return False, "range_too_small"
 
     return True, "ok"
 
@@ -477,7 +468,8 @@ def scan_for_setup():
     if not spread_ok(SYMBOL, MAX_SPREAD_POINTS):
         return None
 
-    snapshot, candidates = generate_setup_candidates(SYMBOL)
+    session_name = current_session_name()
+    snapshot, candidates = generate_setup_candidates(SYMBOL, session_name)
     if not is_new_m5_bar(snapshot):
         return None
 
@@ -489,7 +481,11 @@ def scan_for_setup():
     save_state(state)
     best = None
 
-    for candidate in candidates[:MAX_CANDIDATES_PER_SCAN]:
+    reviewed = 0
+    for candidate in candidates:
+        if reviewed >= MAX_CANDIDATES_PER_SCAN:
+            break
+
         if is_candidate_on_cooldown(state, candidate, now_bahrain()):
             continue
 
@@ -509,11 +505,12 @@ def scan_for_setup():
                 "last_analysis": state.get("last_analysis", {}),
                 "watched_levels": state.get("watched_levels", {}),
                 "last_signal": state.get("last_signal", {}),
-                "session": current_session_name(),
+                "session": session_name,
                 "market_open": market_is_open(),
             },
         }
 
+        reviewed += 1
         verdict = evaluate_setup(payload)
         candidate["verdict"] = verdict
         candidate["snapshot"] = snapshot
@@ -528,7 +525,10 @@ def scan_for_setup():
             save_state(state)
             continue
 
-        if best is None or int(verdict.get("score", 0)) > int(best["verdict"].get("score", 0)):
+        combined_score = candidate.get("local_score", 0) + int(verdict.get("score", 0))
+        candidate["combined_score"] = combined_score
+
+        if best is None or combined_score > best.get("combined_score", 0):
             best = candidate
 
     return best
@@ -536,12 +536,13 @@ def scan_for_setup():
 
 def maybe_macro_veto(setup):
     if not ENABLE_WEB_SIGNAL_VETO:
-        return True
+        return True, None
+
     score = int(setup["verdict"].get("score", 0))
     if score < SIGNAL_MACRO_VETO_THRESHOLD:
-        return True
+        return True, None
 
-    brief = macro_news_brief(
+    result = macro_veto_for_setup(
         {
             "symbol": SYMBOL,
             "market_snapshot": setup["snapshot"],
@@ -557,13 +558,17 @@ def maybe_macro_veto(setup):
         use_web=True,
     )
 
-    impact = brief.get("impact_note", "").lower()
-    direction = setup["direction"]
-    if direction == "buy" and any(x in impact for x in ["heavy for gold", "bearish for gold", "stronger dollar", "higher yields"]):
-        return False
-    if direction == "sell" and any(x in impact for x in ["supportive for gold", "bullish for gold", "weaker dollar", "falling yields"]):
-        return False
-    return True
+    allow = bool(result.get("allow_trade", True))
+    risk_flag = result.get("risk_flag", "none")
+    adjusted_score = int(result.get("adjusted_score", score) or score)
+
+    if risk_flag == "veto":
+        return False, result
+
+    if adjusted_score and adjusted_score < MIN_EXECUTION_SCORE:
+        return False, result
+
+    return allow, result
 
 
 def maybe_execute_trade(setup):
@@ -583,7 +588,9 @@ def maybe_execute_trade(setup):
         return
     if score < MIN_EXECUTION_SCORE or not sl_valid or not tp_valid:
         return
-    if not maybe_macro_veto(setup):
+
+    allow_trade, veto_info = maybe_macro_veto(setup)
+    if not allow_trade:
         return
 
     open_positions = get_open_positions(SYMBOL)
@@ -600,7 +607,10 @@ def maybe_execute_trade(setup):
     else:
         result = place_sell(SYMBOL, lot=lot, sl=setup["sl"], tp=setup["tp"], comment="gold_master_sell")
 
-    send_structured_signal("Gold Master update — order is in", build_signal_lines(setup) + ["", "Volume: {0}".format(lot), "Broker retcode: {0}".format(getattr(result, "retcode", "N/A"))])
+    lines = build_signal_lines(setup) + ["", "Volume: {0}".format(lot), "Broker retcode: {0}".format(getattr(result, "retcode", "N/A"))]
+    if veto_info and veto_info.get("headline"):
+        lines += ["", "Macro note: {0}".format(veto_info.get("headline"))]
+    send_structured_signal("Gold Master update — order is in", lines)
 
 
 def send_welcome_message():
@@ -612,7 +622,7 @@ def send_welcome_message():
 
 def run_forever():
     connect()
-    print("Gold Master upgraded engine connected to MT5.")
+    print("Gold Master smarter engine connected to MT5.")
 
     try:
         send_welcome_message()

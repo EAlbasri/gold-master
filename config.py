@@ -30,7 +30,7 @@ RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "0.005"))
 MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "0.015"))
 MAX_SPREAD_POINTS = int(os.getenv("MAX_SPREAD_POINTS", "80"))
 MAX_OPEN_TRADES = int(os.getenv("MAX_OPEN_TRADES", "1"))
-MIN_RR = float(os.getenv("MIN_RR", "1.5"))
+MIN_RR = float(os.getenv("MIN_RR", "1.4"))
 TP_RR = float(os.getenv("TP_RR", "2.0"))
 
 AUTO_EXECUTE = os.getenv("AUTO_EXECUTE", "false").lower() == "true"
@@ -63,5 +63,8 @@ ENABLE_BREAKOUT_RETEST = os.getenv("ENABLE_BREAKOUT_RETEST", "true").lower() == 
 ENABLE_LIQUIDITY_REVERSAL = os.getenv("ENABLE_LIQUIDITY_REVERSAL", "true").lower() == "true"
 ENABLE_IMPULSE_CONTINUATION = os.getenv("ENABLE_IMPULSE_CONTINUATION", "true").lower() == "true"
 ENABLE_FAILED_BOUNCE_CONTINUATION = os.getenv("ENABLE_FAILED_BOUNCE_CONTINUATION", "true").lower() == "true"
+ENABLE_STRUCTURE_BREAK_RETEST = os.getenv("ENABLE_STRUCTURE_BREAK_RETEST", "true").lower() == "true"
 
-MAX_CANDIDATES_PER_SCAN = int(os.getenv("MAX_CANDIDATES_PER_SCAN", "2"))
+# Candidate control
+MAX_CANDIDATES_PER_SCAN = int(os.getenv("MAX_CANDIDATES_PER_SCAN", "4"))
+LOCAL_REVIEW_MIN_SCORE = int(os.getenv("LOCAL_REVIEW_MIN_SCORE", "68"))

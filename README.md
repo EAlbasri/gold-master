@@ -1,17 +1,13 @@
-Gold Master upgraded intraday engine.
+Gold Master smarter intraday engine.
 
-Highlights:
-- market-hours aware (no weekend / closed-market scanning or commentary)
-- session-aware commentary
-- new M5 bar gating to avoid repeated LLM calls on the same structure
-- local rejection cooldown
-- multi-pattern intraday engine for gold:
-  - breakout continuation
-  - breakout retest
-  - failed-bounce continuation
-  - trend pullback
-  - liquidity reversal
-  - impulse continuation (blocked in sideways regimes)
+What changed:
+- Each strategy can generate its own signal candidate independently.
+- The bot does NOT require all strategies to align at the same time.
+- Added local candidate scoring and ranking before Claude review.
+- Added SMC-inspired structure-break retest.
+- Kept breakout continuation, breakout retest, failed-bounce continuation, trend pullback, liquidity reversal, and impulse continuation.
+- Added macro veto for only the strongest signals.
+- Market-hours aware and quiet on weekends/closed market.
 
 Before use:
 1. Rotate any exposed MT5 / Claude / Telegram keys.

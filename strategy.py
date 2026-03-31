@@ -8,6 +8,7 @@ from config import (
     ENABLE_FAILED_BOUNCE_CONTINUATION,
     ENABLE_IMPULSE_CONTINUATION,
     ENABLE_LIQUIDITY_REVERSAL,
+    ENABLE_STRUCTURE_BREAK_RETEST,
     ENABLE_TREND_PULLBACK,
     MIN_RR,
     TP_RR,
@@ -95,9 +96,9 @@ def classify_regime(symbol):
     mean_body = avg_body(m15, 12)
     compression_pct = ((recent_high - recent_low) / max(last_close, 1.0)) * 100.0
 
-    if bias == "bullish" and last_close > recent_high and last_body > mean_body * 1.3:
+    if bias == "bullish" and last_close > recent_high and last_body > mean_body * 1.25:
         return "bullish_expansion"
-    if bias == "bearish" and last_close < recent_low and last_body > mean_body * 1.3:
+    if bias == "bearish" and last_close < recent_low and last_body > mean_body * 1.25:
         return "bearish_expansion"
     if compression_pct < 0.9:
         return "sideways_compression"
@@ -300,6 +301,48 @@ def detect_breakout_retest(symbol, direction, regime):
     return None
 
 
+def detect_structure_break_retest(symbol, direction, regime):
+    if not ENABLE_STRUCTURE_BREAK_RETEST:
+        return None
+
+    m15 = get_rates(symbol, mt5.TIMEFRAME_M15, 90)
+    levels = _get_recent_levels(m15)
+    width = max(levels["range_high_20"] - levels["range_low_20"], 8.0)
+    swings = m15.iloc[-12:-2]
+    last = m15.iloc[-1]
+    prev = m15.iloc[-2]
+
+    if direction == "buy":
+        structure_level = float(swings["high"].max())
+        broke = float(prev["close"]) > structure_level or float(last["close"]) > structure_level
+        retest = float(last["low"]) <= structure_level + max(width * 0.10, 4.0) and float(last["close"]) > structure_level
+        if broke and retest:
+            return _make_candidate(
+                "structure_break_retest",
+                "buy",
+                float(last["close"]),
+                min(float(last["low"]), structure_level),
+                float(last["close"]) + width,
+                "Bullish BOS retest held; SMC-style continuation candidate.",
+                regime,
+            )
+    else:
+        structure_level = float(swings["low"].min())
+        broke = float(prev["close"]) < structure_level or float(last["close"]) < structure_level
+        retest = float(last["high"]) >= structure_level - max(width * 0.10, 4.0) and float(last["close"]) < structure_level
+        if broke and retest:
+            return _make_candidate(
+                "structure_break_retest",
+                "sell",
+                float(last["close"]),
+                max(float(last["high"]), structure_level),
+                float(last["close"]) - width,
+                "Bearish BOS retest held; SMC-style continuation candidate.",
+                regime,
+            )
+    return None
+
+
 def detect_failed_bounce_continuation(symbol, direction, regime):
     if not ENABLE_FAILED_BOUNCE_CONTINUATION:
         return None
@@ -463,7 +506,7 @@ def detect_impulse_continuation(symbol, direction, regime):
 
     if direction == "buy":
         retrace_low = float(recent["low"].min())
-        max_retrace = impulse_close - ((impulse_close - impulse_open) * 0.5)
+        max_retrace = impulse_close - ((impulse_close - impulse_open) * 0.55)
         shallow = retrace_low >= max_retrace
         confirm = float(last["close"]) > float(m15["ema20"].iloc[-1])
         if shallow and confirm:
@@ -478,7 +521,7 @@ def detect_impulse_continuation(symbol, direction, regime):
             )
     else:
         retrace_high = float(recent["high"].max())
-        max_retrace = impulse_close + ((impulse_open - impulse_close) * 0.5)
+        max_retrace = impulse_close + ((impulse_open - impulse_close) * 0.55)
         shallow = retrace_high <= max_retrace
         confirm = float(last["close"]) < float(m15["ema20"].iloc[-1])
         if shallow and confirm:
@@ -492,18 +535,6 @@ def detect_impulse_continuation(symbol, direction, regime):
                 regime,
             )
     return None
-
-
-def _priority(candidate):
-    priority_map = {
-        "breakout_retest": 1,
-        "breakout_continuation": 2,
-        "failed_bounce_continuation": 3,
-        "liquidity_reversal": 4,
-        "trend_pullback": 5,
-        "impulse_continuation": 6,
-    }
-    return priority_map.get(candidate["setup_type"], 99)
 
 
 def build_trade_plan(candidate, snapshot):
@@ -530,6 +561,94 @@ def build_trade_plan(candidate, snapshot):
     candidate["tp"] = round(tp_anchor, 2)
     candidate["tp2"] = round(tp2, 2)
     return candidate
+
+
+def score_candidate(candidate, snapshot, session_name):
+    score = 50
+    setup_type = candidate.get("setup_type", "")
+    regime = snapshot.get("regime", "sideways")
+    bias = snapshot.get("bias", "sideways")
+    direction = candidate.get("direction", "")
+    entry = float(candidate.get("entry", 0))
+    sl = float(candidate.get("sl", 0))
+    tp = float(candidate.get("tp", 0))
+    vwap = float(snapshot.get("m5_vwap", 0))
+    recent_range = float(snapshot.get("recent_structure", {}).get("recent_range", 0))
+    trigger = float(candidate.get("trigger_level", entry))
+
+    risk = abs(entry - sl)
+    reward = abs(tp - entry)
+    rr = reward / risk if risk > 0 else 0
+
+    if rr >= 2.0:
+        score += 12
+    elif rr >= MIN_RR:
+        score += 8
+    else:
+        score -= 18
+
+    if regime == "bullish_expansion" and direction == "buy":
+        score += 10
+    if regime == "bearish_expansion" and direction == "sell":
+        score += 10
+    if regime == "bullish_trend" and direction == "buy":
+        score += 8
+    if regime == "bearish_trend" and direction == "sell":
+        score += 8
+    if regime in ["sideways", "sideways_compression"] and setup_type in ["trend_pullback", "impulse_continuation", "failed_bounce_continuation"]:
+        score -= 20
+
+    if session_name == "New York":
+        score += 5
+    elif session_name == "London":
+        score += 4
+    elif session_name == "Asia" and setup_type in ["breakout_continuation", "failed_bounce_continuation", "impulse_continuation"]:
+        score -= 8
+    elif session_name == "Off-session":
+        score -= 15
+
+    if setup_type == "breakout_retest":
+        score += 9
+    elif setup_type == "structure_break_retest":
+        score += 9
+    elif setup_type == "breakout_continuation":
+        score += 7
+    elif setup_type == "failed_bounce_continuation":
+        score += 7
+    elif setup_type == "liquidity_reversal":
+        score += 5
+    elif setup_type == "trend_pullback":
+        score += 4
+    elif setup_type == "impulse_continuation":
+        score += 2
+
+    vwap_distance = abs(entry - vwap)
+    if regime in ["bullish_expansion", "bearish_expansion"]:
+        if vwap_distance <= max(snapshot.get("daily_atr_14", 0) * 0.35, 24):
+            score += 4
+        else:
+            score -= 6
+    else:
+        if vwap_distance <= max(snapshot.get("daily_atr_14", 0) * 0.22, 16):
+            score += 4
+        else:
+            score -= 8
+
+    if setup_type in ["breakout_continuation", "breakout_retest", "structure_break_retest"]:
+        if abs(entry - trigger) <= max(risk * 1.2, 18):
+            score += 4
+        else:
+            score -= 10
+
+    if recent_range < 16 and setup_type in ["breakout_continuation", "breakout_retest", "structure_break_retest"]:
+        score -= 8
+
+    if bias == "bullish" and direction == "buy":
+        score += 4
+    if bias == "bearish" and direction == "sell":
+        score += 4
+
+    return max(0, min(100, int(score)))
 
 
 def get_market_snapshot(symbol):
@@ -572,7 +691,7 @@ def get_market_snapshot(symbol):
     }
 
 
-def generate_setup_candidates(symbol):
+def generate_setup_candidates(symbol, session_name):
     snapshot = get_market_snapshot(symbol)
     regime = snapshot["regime"]
     bias = snapshot["bias"]
@@ -580,16 +699,29 @@ def generate_setup_candidates(symbol):
     directions = []
     if bias == "bullish":
         directions.append("buy")
+        if regime in ["bearish_expansion"] and not BUY_ONLY:
+            directions.append("sell")
     elif bias == "bearish" and not BUY_ONLY:
         directions.append("sell")
+        if regime in ["bullish_expansion"]:
+            directions.append("buy")
     elif bias == "sideways" and not BUY_ONLY:
         directions.extend(["buy", "sell"])
     elif bias == "sideways" and BUY_ONLY:
         directions.append("buy")
 
+    # dedupe preserve order
+    seen = set()
+    final_directions = []
+    for d in directions:
+        if d not in seen:
+            seen.add(d)
+            final_directions.append(d)
+
     candidates = []
     detectors = [
         detect_breakout_retest,
+        detect_structure_break_retest,
         detect_breakout_continuation,
         detect_failed_bounce_continuation,
         detect_liquidity_reversal,
@@ -597,11 +729,13 @@ def generate_setup_candidates(symbol):
         detect_impulse_continuation,
     ]
 
-    for direction in directions:
+    for direction in final_directions:
         for detector in detectors:
             candidate = detector(symbol, direction, regime)
             if candidate:
-                candidates.append(build_trade_plan(candidate, snapshot))
+                candidate = build_trade_plan(candidate, snapshot)
+                candidate["local_score"] = score_candidate(candidate, snapshot, session_name)
+                candidates.append(candidate)
 
-    candidates.sort(key=_priority)
+    candidates.sort(key=lambda c: c.get("local_score", 0), reverse=True)
     return snapshot, candidates
