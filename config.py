@@ -8,7 +8,7 @@ MT5_LOGIN = int(os.getenv("MT5_LOGIN", "0"))
 MT5_PASSWORD = os.getenv("MT5_PASSWORD", "")
 MT5_SERVER = os.getenv("MT5_SERVER", "")
 
-# Claude / Anthropic
+# Anthropic / Claude
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5")
 USE_CLAUDE_WEB_SEARCH = os.getenv("USE_CLAUDE_WEB_SEARCH", "true").lower() == "true"
@@ -22,19 +22,18 @@ ENABLE_WEB_SIGNAL_VETO = os.getenv("ENABLE_WEB_SIGNAL_VETO", "true").lower() == 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-# Trading
-SYMBOL = os.getenv("SYMBOL", "XAUUSD")
+# Symbols
+SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "XAUUSD,EURUSD,USDJPY").split(",") if s.strip()]
 
-# Risk / Execution
+# Risk / execution
 RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "0.005"))
 MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "0.015"))
 MAX_SPREAD_POINTS = int(os.getenv("MAX_SPREAD_POINTS", "80"))
 MAX_OPEN_TRADES = int(os.getenv("MAX_OPEN_TRADES", "1"))
-MIN_RR = float(os.getenv("MIN_RR", "1.4"))
+MIN_RR = float(os.getenv("MIN_RR", "1.5"))
 TP_RR = float(os.getenv("TP_RR", "2.0"))
-
 AUTO_EXECUTE = os.getenv("AUTO_EXECUTE", "false").lower() == "true"
-MIN_SIGNAL_SCORE = int(os.getenv("MIN_SIGNAL_SCORE", "84"))
+MIN_SIGNAL_SCORE = int(os.getenv("MIN_SIGNAL_SCORE", "82"))
 MIN_EXECUTION_SCORE = int(os.getenv("MIN_EXECUTION_SCORE", "90"))
 SIGNAL_MACRO_VETO_THRESHOLD = int(os.getenv("SIGNAL_MACRO_VETO_THRESHOLD", "88"))
 BUY_ONLY = os.getenv("BUY_ONLY", "false").lower() == "true"
@@ -44,15 +43,18 @@ SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "60"))
 CLOSED_LOOP_SLEEP_SECONDS = int(os.getenv("CLOSED_LOOP_SLEEP_SECONDS", "300"))
 COOLDOWN_MINUTES = int(os.getenv("COOLDOWN_MINUTES", "30"))
 REJECTION_COOLDOWN_MINUTES = int(os.getenv("REJECTION_COOLDOWN_MINUTES", "25"))
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 STATE_FILE_PATH = os.getenv("STATE_FILE_PATH", "gold_master_state.json")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+LOCAL_REVIEW_MIN_SCORE = int(os.getenv("LOCAL_REVIEW_MIN_SCORE", "68"))
+MAX_CANDIDATES_PER_SYMBOL = int(os.getenv("MAX_CANDIDATES_PER_SYMBOL", "3"))
+MAX_REVIEWS_PER_CYCLE = int(os.getenv("MAX_REVIEWS_PER_CYCLE", "4"))
 
-# Session / commentary cadence
+# Session / cadence
 SESSION_WINDOW_MINUTES = int(os.getenv("SESSION_WINDOW_MINUTES", "20"))
 PULSE_UPDATE_MINUTES = int(os.getenv("PULSE_UPDATE_MINUTES", "240"))
 NEWS_STYLE_UPDATE_MINUTES = int(os.getenv("NEWS_STYLE_UPDATE_MINUTES", "180"))
 
-# Market hours (UTC, configurable per broker)
+# Market hours
 MARKET_OPEN_SUNDAY_UTC = os.getenv("MARKET_OPEN_SUNDAY_UTC", "22:05")
 MARKET_CLOSE_FRIDAY_UTC = os.getenv("MARKET_CLOSE_FRIDAY_UTC", "21:55")
 
@@ -64,7 +66,3 @@ ENABLE_LIQUIDITY_REVERSAL = os.getenv("ENABLE_LIQUIDITY_REVERSAL", "true").lower
 ENABLE_IMPULSE_CONTINUATION = os.getenv("ENABLE_IMPULSE_CONTINUATION", "true").lower() == "true"
 ENABLE_FAILED_BOUNCE_CONTINUATION = os.getenv("ENABLE_FAILED_BOUNCE_CONTINUATION", "true").lower() == "true"
 ENABLE_STRUCTURE_BREAK_RETEST = os.getenv("ENABLE_STRUCTURE_BREAK_RETEST", "true").lower() == "true"
-
-# Candidate control
-MAX_CANDIDATES_PER_SCAN = int(os.getenv("MAX_CANDIDATES_PER_SCAN", "4"))
-LOCAL_REVIEW_MIN_SCORE = int(os.getenv("LOCAL_REVIEW_MIN_SCORE", "68"))

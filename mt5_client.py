@@ -79,7 +79,7 @@ def _send_order(symbol, lot, order_type, price, sl, tp, deviation=20, comment="g
         "sl": sl,
         "tp": tp,
         "deviation": deviation,
-        "magic": 20260329,
+        "magic": 20260401,
         "comment": comment,
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": mt5.ORDER_FILLING_IOC,

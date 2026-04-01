@@ -10,7 +10,6 @@ def _send(payload):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram not configured.")
         return False
-
     try:
         response = requests.post("{0}/sendMessage".format(TELEGRAM_BASE_URL), json=payload, timeout=20)
         response.raise_for_status()

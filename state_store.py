@@ -2,7 +2,7 @@ import json
 import os
 from datetime import datetime, timedelta
 
-from config import REJECTION_COOLDOWN_MINUTES, STATE_FILE_PATH
+from config import REJECTION_COOLDOWN_MINUTES, STATE_FILE_PATH, SYMBOLS
 
 
 def _default_state():
@@ -11,12 +11,9 @@ def _default_state():
         "watched_levels": {},
         "last_macro_headline": "",
         "last_signal": {},
-        "session_marks": {},
-        "last_m5_bar_time": "",
-        "rejected_candidates": {},
         "last_market_closed_note": "",
         "last_market_open_note": "",
-        "last_reviewed_fingerprint": "",
+        "symbols": {s: {"last_m5_bar_time": "", "rejected_candidates": {}} for s in SYMBOLS},
     }
 
 
@@ -26,9 +23,11 @@ def load_state():
     try:
         with open(STATE_FILE_PATH, "r") as f:
             data = json.load(f)
-        base = _default_state()
-        base.update(data)
-        return base
+        state = _default_state()
+        state.update(data)
+        for s in SYMBOLS:
+            state.setdefault("symbols", {}).setdefault(s, {"last_m5_bar_time": "", "rejected_candidates": {}})
+        return state
     except Exception:
         return _default_state()
 
@@ -36,6 +35,12 @@ def load_state():
 def save_state(state):
     with open(STATE_FILE_PATH, "w") as f:
         json.dump(state, f, indent=2)
+
+
+def symbol_state(state, symbol):
+    state.setdefault("symbols", {})
+    state["symbols"].setdefault(symbol, {"last_m5_bar_time": "", "rejected_candidates": {}})
+    return state["symbols"][symbol]
 
 
 def candidate_fingerprint(candidate):
@@ -47,9 +52,9 @@ def candidate_fingerprint(candidate):
     )
 
 
-def is_candidate_on_cooldown(state, candidate, now_dt):
+def is_candidate_on_cooldown(state, symbol, candidate, now_dt):
     fp = candidate_fingerprint(candidate)
-    item = state.get("rejected_candidates", {}).get(fp)
+    item = symbol_state(state, symbol).get("rejected_candidates", {}).get(fp)
     if not item:
         return False
     try:
@@ -59,24 +64,24 @@ def is_candidate_on_cooldown(state, candidate, now_dt):
     return now_dt - ts < timedelta(minutes=REJECTION_COOLDOWN_MINUTES)
 
 
-def mark_candidate_rejected(state, candidate, now_dt, reason="rejected"):
+def mark_candidate_rejected(state, symbol, candidate, now_dt, reason="rejected"):
     fp = candidate_fingerprint(candidate)
-    if "rejected_candidates" not in state:
-        state["rejected_candidates"] = {}
-    state["rejected_candidates"][fp] = {
+    symbol_state(state, symbol).setdefault("rejected_candidates", {})[fp] = {
         "timestamp": now_dt.isoformat(),
         "reason": reason,
     }
 
 
 def prune_rejections(state, now_dt):
-    kept = {}
-    for fp, item in state.get("rejected_candidates", {}).items():
-        try:
-            ts = datetime.fromisoformat(item.get("timestamp", ""))
-        except Exception:
-            continue
-        if now_dt - ts < timedelta(minutes=REJECTION_COOLDOWN_MINUTES):
-            kept[fp] = item
-    state["rejected_candidates"] = kept
+    for symbol in SYMBOLS:
+        sstate = symbol_state(state, symbol)
+        kept = {}
+        for fp, item in sstate.get("rejected_candidates", {}).items():
+            try:
+                ts = datetime.fromisoformat(item.get("timestamp", ""))
+            except Exception:
+                continue
+            if now_dt - ts < timedelta(minutes=REJECTION_COOLDOWN_MINUTES):
+                kept[fp] = item
+        sstate["rejected_candidates"] = kept
     return state

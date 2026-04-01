@@ -1,16 +1,36 @@
-Gold Master smarter intraday engine.
+Gold Master multi-symbol intraday engine.
 
-What changed:
-- Each strategy can generate its own signal candidate independently.
-- The bot does NOT require all strategies to align at the same time.
-- Added local candidate scoring and ranking before Claude review.
-- Added SMC-inspired structure-break retest.
-- Kept breakout continuation, breakout retest, failed-bounce continuation, trend pullback, liquidity reversal, and impulse continuation.
-- Added macro veto for only the strongest signals.
-- Market-hours aware and quiet on weekends/closed market.
+Tracked symbols by default:
+- XAUUSD
+- EURUSD
+- USDJPY
 
-Before use:
-1. Rotate any exposed MT5 / Claude / Telegram keys.
-2. Copy env_template.txt to .env and fill your fresh keys.
-3. Keep AUTO_EXECUTE=false until demo validation looks good.
-4. Keep RISK_PER_TRADE=0.005 and MAX_OPEN_TRADES=1.
+Core design:
+- local MT5 engine scans every minute
+- one strategy can produce a trade candidate on its own
+- candidates are scored locally first
+- only the best few are reviewed by Claude
+- market-hours aware
+- weekend / closed-market aware
+- rejection cooldown to reduce API waste
+
+Strategies included:
+- breakout continuation
+- breakout retest
+- structure break retest (SMC-style)
+- failed-bounce continuation
+- trend pullback
+- liquidity reversal
+- impulse continuation
+
+Recommended safe startup:
+- AUTO_EXECUTE=false
+- RISK_PER_TRADE=0.005
+- MAX_OPEN_TRADES=1
+- MAX_REVIEWS_PER_CYCLE=4
+- LOCAL_REVIEW_MIN_SCORE=68
+
+Important:
+- Rotate any credentials that were previously shared.
+- No strategy can honestly guarantee daily signals or profits.
+- This version is designed to broaden coverage and reduce wasted API calls.
